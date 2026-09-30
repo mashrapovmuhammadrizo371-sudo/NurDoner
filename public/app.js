@@ -15,4 +15,11 @@ function card(p){const fav=state.me?.favorites?.includes(p._id);return `<article
 function go(t){state.tab=t;render()} async function favorite(id){state.me=await api("/api/favorite/"+id,{method:"POST"});render()}
 async function openQR(){const d=await api("/api/qr");state.modal=`<div class="modal" onclick="closeModal()"><div class="sheet" onclick="event.stopPropagation()"><button class="close" onclick="closeModal()">×</button><h2>🧾 Loyalty Card</h2><p>Kassada QR-kodingizni ko'rsating.</p><img class="qr" src="${d}"><b>${state.me?.points||0} ball</b></div></div>`;render()}
 function closeModal(){state.modal="";render()}
-(async()=>{try{[state.me,state.products,state.promos,state.rewards]=await Promise.all([api("/api/me"),api("/api/products"),api("/api/promos"),api("/api/rewards")]);render()}catch(e){document.querySelector("#app").innerHTML='<div class="empty">Mini App faqat Telegram ichida ishlaydi.</div>'}})();
+(async()=>{try{
+  document.querySelector("#app").innerHTML='<div class="empty">NurDoner yuklanmoqda...</div>';
+  [state.products,state.promos,state.rewards]=await Promise.all([api("/api/products"),api("/api/promos"),api("/api/rewards")]);
+  try{state.me=await api("/api/me")}catch(e){state.me={firstName:"Mehmon",points:0,favorites:[]}}
+  render();
+}catch(e){
+  document.querySelector("#app").innerHTML='<div class="empty"><h2>NurDoner</h2><p>Ilovani yuklashda xatolik yuz berdi.</p><p>'+String(e.message||e)+'</p></div>';
+}})();
