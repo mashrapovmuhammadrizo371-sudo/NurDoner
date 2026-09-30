@@ -28,7 +28,7 @@ function validateTelegram(initData){
  const data=[...p.entries()].sort().map(([k,v])=>`${k}=${v}`).join("\n");
  const secret=crypto.createHmac("sha256","WebAppData").update(process.env.BOT_TOKEN).digest();
  const check=crypto.createHmac("sha256",secret).update(data).digest("hex");
- if(!hash||!crypto.timingSafeEqual(Buffer.from(hash),Buffer.from(check))) return null;
+ if(!hash||hash.length!==check.length||!crypto.timingSafeEqual(Buffer.from(hash),Buffer.from(check))) return null;
  const u=p.get("user"); return u?JSON.parse(u):null;
 }
 async function currentUser(req,res){
@@ -39,10 +39,13 @@ async function currentUser(req,res){
  return user;
 }
 
+app.get("/",(req,res)=>res.sendFile("index.html",{root:"public"}));
+app.get("/health",(req,res)=>res.json({ok:true,service:"NurDoner"}));
+
 app.get("/api/me",async(req,res)=>{try{const u=await currentUser(req,res);if(!u)return;res.json(u)}catch(e){res.status(500).json({error:e.message})}});
-app.get("/api/products",async(req,res)=>res.json(await Product.find({active:true}).sort({category:1,name:1})));
-app.get("/api/promos",async(req,res)=>res.json(await Promo.find({active:true}).sort({createdAt:-1}).limit(10)));
-app.get("/api/rewards",async(req,res)=>res.json(await Reward.find({active:true}).sort({cost:1})));
+app.get("/api/products",async(req,res)=>{try{res.json(await Product.find({active:true}).sort({category:1,name:1}))}catch(e){res.status(500).json({error:e.message})}});
+app.get("/api/promos",async(req,res)=>{try{res.json(await Promo.find({active:true}).sort({createdAt:-1}).limit(10))}catch(e){res.status(500).json({error:e.message})}});
+app.get("/api/rewards",async(req,res)=>{try{res.json(await Reward.find({active:true}).sort({cost:1}))}catch(e){res.status(500).json({error:e.message})}});
 app.post("/api/favorite/:id",async(req,res)=>{try{const u=await currentUser(req,res);if(!u)return;const id=req.params.id;u.favorites=u.favorites.includes(id)?u.favorites.filter(x=>x!==id):[...u.favorites,id];await u.save();res.json(u)}catch(e){res.status(500).json({error:e.message})}});
 app.get("/api/qr",async(req,res)=>{try{const u=await currentUser(req,res);if(!u)return;res.type("text/plain").send(await QRCode.toDataURL(`NURDONER:${u.telegramId}`))}catch(e){res.status(500).json({error:e.message})}});
 
@@ -75,12 +78,18 @@ app.post("/api/admin/broadcast",admin,async(req,res)=>{
 });
 
 let bot=null;
-if(process.env.BOT_TOKEN){
+if(process.env.BOT_TOKEN && process.env.BOT_POLLING==="true"){
  bot=new Telegraf(process.env.BOT_TOKEN);
  bot.start(ctx=>ctx.reply("🍔 NurDoner Mini App",Markup.keyboard([[Markup.button.webApp("🍔 Mini App'ni ochish",process.env.MINI_APP_URL||"https://example.com")]]).resize()));
  bot.command("menu",ctx=>ctx.reply("🍔 Mini App'ni oching:",Markup.inlineKeyboard([[Markup.button.webApp("Ochish",process.env.MINI_APP_URL||"https://example.com")]])));
- bot.launch().catch(console.error);
+ bot.launch().catch(e=>console.error("Telegram bot polling error:",e.message));
+ console.log("Telegram bot polling enabled");
+}else{
+ console.log("Telegram bot polling disabled (set BOT_POLLING=true only when no other bot instance is running)");
 }
+
+app.listen(PORT,()=>console.log("NurDoner running on "+PORT));
+
 mongoose.connect(process.env.MONGODB_URI).then(async()=>{
  if(await Product.countDocuments()===0) await Product.insertMany([
   {name:"Doner",description:"Yangi non, go'sht, sabzavot va maxsus sous",price:30000,category:"Doner"},
@@ -88,6 +97,8 @@ mongoose.connect(process.env.MONGODB_URI).then(async()=>{
   {name:"Fri",description:"Qarsildoq kartoshka",price:15000,category:"Snacks"},
   {name:"Cola",description:"Sovuq ichimlik",price:8000,category:"Drinks"}
  ]);
- app.listen(PORT,()=>console.log("NurDoner running on "+PORT));
-}).catch(e=>{console.error(e);process.exit(1)});
-process.once("SIGINT",()=>bot?.stop("SIGINT")); process.once("SIGTERM",()=>bot?.stop("SIGTERM"));
+ console.log("MongoDB connected");
+}).catch(e=>console.error("MongoDB error:",e.message));
+
+process.once("SIGINT",()=>bot?.stop("SIGINT"));
+process.once("SIGTERM",()=>bot?.stop("SIGTERM"));
