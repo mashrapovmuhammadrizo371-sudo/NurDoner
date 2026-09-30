@@ -8,6 +8,8 @@ const app=express();
 app.use(express.json());
 app.use(express.static("public"));
 const PORT=process.env.PORT||3000;
+const APP_URL=(process.env.MINI_APP_URL||"").replace(/\/$/,"");
+const WEBHOOK_PATH="/telegram/webhook";
 
 const userSchema=new mongoose.Schema({
  telegramId:{type:String,unique:true,index:true}, username:String, firstName:String,
@@ -78,17 +80,23 @@ app.post("/api/admin/broadcast",admin,async(req,res)=>{
 });
 
 let bot=null;
-if(process.env.BOT_TOKEN && process.env.BOT_POLLING==="true"){
+if(process.env.BOT_TOKEN){
  bot=new Telegraf(process.env.BOT_TOKEN);
- bot.start(ctx=>ctx.reply("🍔 NurDoner Mini App",Markup.keyboard([[Markup.button.webApp("🍔 Mini App'ni ochish",process.env.MINI_APP_URL||"https://example.com")]]).resize()));
- bot.command("menu",ctx=>ctx.reply("🍔 Mini App'ni oching:",Markup.inlineKeyboard([[Markup.button.webApp("Ochish",process.env.MINI_APP_URL||"https://example.com")]])));
- bot.launch().catch(e=>console.error("Telegram bot polling error:",e.message));
- console.log("Telegram bot polling enabled");
-}else{
- console.log("Telegram bot polling disabled (set BOT_POLLING=true only when no other bot instance is running)");
+ bot.start(ctx=>ctx.reply("🍔 NurDoner Mini App",Markup.keyboard([[Markup.button.webApp("🍔 Mini App'ni ochish",APP_URL||"https://example.com")]]).resize()));
+ bot.command("menu",ctx=>ctx.reply("🍔 Mini App'ni oching:",Markup.inlineKeyboard([[Markup.button.webApp("Ochish",APP_URL||"https://example.com")]])));
+ app.use(WEBHOOK_PATH,bot.webhookCallback(WEBHOOK_PATH));
 }
 
-app.listen(PORT,()=>console.log("NurDoner running on "+PORT));
+app.listen(PORT,async()=>{
+ console.log("NurDoner running on "+PORT);
+ if(bot&&APP_URL){
+  try{
+   const webhookUrl=APP_URL+WEBHOOK_PATH;
+   await bot.telegram.setWebhook(webhookUrl);
+   console.log("Telegram webhook enabled: "+webhookUrl);
+  }catch(e){console.error("Telegram webhook error:",e.message)}
+ }
+});
 
 mongoose.connect(process.env.MONGODB_URI).then(async()=>{
  if(await Product.countDocuments()===0) await Product.insertMany([
