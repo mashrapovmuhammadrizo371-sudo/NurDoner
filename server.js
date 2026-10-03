@@ -207,9 +207,9 @@ if(process.env.BOT_TOKEN){
  });
 
  bot.command("menu",ctx=>ctx.reply("🚀 Asosiy menyu:",mainKeyboard()));
- app.use(WEBHOOK_PATH,bot.webhookCallback(WEBHOOK_PATH));
+ // Use Telegram polling for the Reply Keyboard; clear any old webhook first.\n
 }
 
-app.listen(PORT,async()=>{console.log("SMM Bot running on "+PORT);if(bot&&APP_URL){try{await bot.telegram.setWebhook(APP_URL+WEBHOOK_PATH);console.log("Telegram webhook enabled")}catch(e){console.error("Telegram webhook error:",e.message)}}});
+app.listen(PORT,async()=>{console.log("SMM Bot running on "+PORT);if(bot){try{await bot.telegram.deleteWebhook({drop_pending_updates:false});await bot.launch();console.log("Telegram polling enabled")}catch(e){console.error("Telegram polling error:",e.message)}}});
 mongoose.connect(process.env.MONGODB_URI).then(()=>console.log("MongoDB connected")).catch(e=>console.error("MongoDB error:",e.message));
 process.once("SIGINT",()=>bot?.stop("SIGINT"));process.once("SIGTERM",()=>bot?.stop("SIGTERM"));
