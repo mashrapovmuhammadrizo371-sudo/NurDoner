@@ -185,7 +185,7 @@ if(process.env.BOT_TOKEN){
   try{
    const text=ctx.message.text.trim();
    if(session.step==="link"){
-    if(!/^https?:\\/\\//i.test(text))return ctx.reply("❌ To‘g‘ri link yuboring (https://...):");
+    if(!/^https?:\/\//i.test(text))return ctx.reply("❌ To‘g‘ri link yuboring (https://...):");
     session.link=text;session.step="quantity";
     const s=(await getServices()).find(x=>String(x.service)===session.serviceId);
     return ctx.reply(`🔢 Miqdorni yuboring.\nMin: ${s?.min||1} | Max: ${s?.max||"—"}`);
