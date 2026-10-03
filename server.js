@@ -80,12 +80,136 @@ app.get("/api/admin/balance",admin,async(req,res)=>{try{res.json(await smm({acti
 app.get("/api/admin/orders",admin,async(req,res)=>res.json(await Order.find().sort({createdAt:-1}).limit(500)));
 
 let bot=null;
+const sessions=new Map();
+
+function mainKeyboard(){
+ return Markup.keyboard([
+  ["🛒 Buyurtma berish","📦 Buyurtmalarim"],
+  ["📋 Xizmatlar","💰 Balans"],
+  ["👤 Profil","ℹ️ Yordam"]
+ ]).resize();
+}
+function formatService(s){
+ return `🔹 ${s.name}\nID: ${s.service}\nNarx: ${s.rate} UZS / 1000\nMin: ${s.min} | Max: ${s.max}`;
+}
+async function sendServices(ctx){
+ const services=await getServices();
+ if(!services.length)return ctx.reply("Hozircha xizmatlar topilmadi.");
+ const categories=[...new Set(services.map(s=>s.category).filter(Boolean))];
+ const buttons=categories.slice(0,40).map(c=>[Markup.button.callback(`📁 ${c}`,`cat:${encodeURIComponent(c)}`)]);
+ await ctx.reply(`📋 Xizmatlar: ${services.length} ta\n\nKategoriya tanlang:`,Markup.inlineKeyboard(buttons));
+}
+
 if(process.env.BOT_TOKEN){
  bot=new Telegraf(process.env.BOT_TOKEN);
- bot.start(ctx=>ctx.reply("🚀 SMM Bot\n\nInstagram, TikTok, Telegram va boshqa xizmatlarga buyurtma berish uchun Mini App'ni oching.",Markup.keyboard([[Markup.button.webApp("🚀 SMM xizmatlarini ochish",APP_URL||"https://example.com")]]).resize()));
- bot.command("menu",ctx=>ctx.reply("🚀 SMM xizmatlari:",Markup.inlineKeyboard([[Markup.button.webApp("Ochish",APP_URL||"https://example.com")]])));
+
+ bot.start(async ctx=>{
+  sessions.delete(String(ctx.from.id));
+  await ctx.reply("🚀 SMM Botga xush kelibsiz!\n\nXizmatni tanlang:",mainKeyboard());
+ });
+
+ bot.hears("📋 Xizmatlar",async ctx=>{
+  try{await sendServices(ctx)}catch(e){await ctx.reply("❌ Xizmatlarni olishda xatolik: "+e.message)}
+ });
+
+ bot.hears("🛒 Buyurtma berish",async ctx=>{
+  try{
+   const services=await getServices();
+   const categories=[...new Set(services.map(s=>s.category).filter(Boolean))];
+   await ctx.reply("🛒 Buyurtma berish\n\nAvval kategoriya tanlang:",Markup.inlineKeyboard(categories.slice(0,40).map(c=>[Markup.button.callback(`📁 ${c}`,`ordercat:${encodeURIComponent(c)}`)])));
+  }catch(e){await ctx.reply("❌ "+e.message)}
+ });
+
+ bot.action(/^cat:(.+)$/,async ctx=>{
+  try{
+   await ctx.answerCbQuery();
+   const category=decodeURIComponent(ctx.match[1]);
+   const services=(await getServices()).filter(s=>String(s.category||"")===category).slice(0,50);
+   if(!services.length)return ctx.reply("Xizmat topilmadi.");
+   await ctx.reply(`📁 ${category}\n\nXizmatni tanlang:`,Markup.inlineKeyboard(services.map(s=>[Markup.button.callback(String(s.name).slice(0,55),`service:${s.service}`)])));
+  }catch(e){await ctx.reply("❌ "+e.message)}
+ });
+
+ bot.action(/^ordercat:(.+)$/,async ctx=>{
+  try{
+   await ctx.answerCbQuery();
+   const category=decodeURIComponent(ctx.match[1]);
+   const services=(await getServices()).filter(s=>String(s.category||"")===category).slice(0,50);
+   await ctx.reply(`📁 ${category}\n\nBuyurtma uchun xizmatni tanlang:`,Markup.inlineKeyboard(services.map(s=>[Markup.button.callback(String(s.name).slice(0,55),`buyservice:${s.service}`)])));
+  }catch(e){await ctx.reply("❌ "+e.message)}
+ });
+
+ bot.action(/^service:(.+)$/,async ctx=>{
+  try{
+   await ctx.answerCbQuery();
+   const s=(await getServices()).find(x=>String(x.service)===String(ctx.match[1]));
+   if(!s)return ctx.reply("Xizmat topilmadi.");
+   await ctx.reply(formatService(s));
+  }catch(e){await ctx.reply("❌ "+e.message)}
+ });
+
+ bot.action(/^buyservice:(.+)$/,async ctx=>{
+  try{
+   await ctx.answerCbQuery();
+   const serviceId=String(ctx.match[1]),s=(await getServices()).find(x=>String(x.service)===serviceId);
+   if(!s)return ctx.reply("Xizmat topilmadi.");
+   sessions.set(String(ctx.from.id),{step:"link",serviceId});
+   await ctx.reply(`🛒 ${s.name}\n\n🔗 Linkni yuboring:`);
+  }catch(e){await ctx.reply("❌ "+e.message)}
+ });
+
+ bot.hears("📦 Buyurtmalarim",async ctx=>{
+  try{
+   const u=await User.findOne({telegramId:String(ctx.from.id)});
+   if(!u)return ctx.reply("Sizda hali buyurtmalar yo‘q.",mainKeyboard());
+   const orders=await Order.find({telegramId:u.telegramId}).sort({createdAt:-1}).limit(10);
+   if(!orders.length)return ctx.reply("📦 Hali buyurtmalar yo‘q.",mainKeyboard());
+   await ctx.reply("📦 Oxirgi buyurtmalar:\n\n"+orders.map(o=>`#${o.orderId} — ${o.status}\n${o.serviceName}\nMiqdor: ${o.quantity}`).join("\n\n"),mainKeyboard());
+  }catch(e){await ctx.reply("❌ "+e.message)}
+ });
+
+ bot.hears("💰 Balans",async ctx=>{
+  try{const b=await smm({action:"balance"});await ctx.reply(`💰 SMM balans: ${b.balance??"—"} ${b.currency||"UZS"}`,mainKeyboard())}catch(e){await ctx.reply("❌ "+e.message)}
+ });
+
+ bot.hears("👤 Profil",async ctx=>{
+  const u=await User.findOne({telegramId:String(ctx.from.id)});
+  await ctx.reply(`👤 Profil\n\nTelegram ID: ${ctx.from.id}\nUsername: @${ctx.from.username||"—"}\nBuyurtmalar: ${await Order.countDocuments({telegramId:String(ctx.from.id)})}`,mainKeyboard());
+ });
+
+ bot.hears("ℹ️ Yordam",ctx=>ctx.reply("ℹ️ Yordam\n\n🛒 Buyurtma berish — xizmat tanlab, link va miqdor yuborasiz.\n📦 Buyurtmalarim — buyurtmalaringiz.\n📋 Xizmatlar — mavjud xizmatlar.\n💰 Balans — SMM API balansini ko‘rsatadi.",mainKeyboard()));
+
+ bot.on("text",async ctx=>{
+  const id=String(ctx.from.id),session=sessions.get(id);
+  if(!session)return;
+  try{
+   const text=ctx.message.text.trim();
+   if(session.step==="link"){
+    if(!/^https?:\\/\\//i.test(text))return ctx.reply("❌ To‘g‘ri link yuboring (https://...):");
+    session.link=text;session.step="quantity";
+    const s=(await getServices()).find(x=>String(x.service)===session.serviceId);
+    return ctx.reply(`🔢 Miqdorni yuboring.\nMin: ${s?.min||1} | Max: ${s?.max||"—"}`);
+   }
+   if(session.step==="quantity"){
+    const quantity=Number(text);
+    if(!Number.isInteger(quantity)||quantity<=0)return ctx.reply("❌ Faqat butun musbat son yuboring.");
+    const s=(await getServices()).find(x=>String(x.service)===session.serviceId);
+    if(!s)return ctx.reply("❌ Xizmat topilmadi.");
+    if(quantity<Number(s.min)||quantity>Number(s.max))return ctx.reply(`❌ Miqdor ${s.min}–${s.max} oralig‘ida bo‘lishi kerak.`);
+    const result=await smm({action:"add",service:session.serviceId,link:session.link,quantity:String(quantity)});
+    if(!result.order)throw new Error(result.error||"Buyurtma yaratilmadi");
+    const u=await User.findOneAndUpdate({telegramId:id},{$set:{username:ctx.from.username||"",firstName:ctx.from.first_name||""}},{upsert:true,new:true,setDefaultsOnInsert:true});
+    const order=await Order.create({telegramId:id,orderId:String(result.order),serviceId:session.serviceId,serviceName:s.name,category:s.category,link:session.link,quantity,charge:Number((Number(s.rate)*quantity/1000).toFixed(6)),currency:"UZS",status:"Pending"});
+    sessions.delete(id);
+    return ctx.reply(`✅ Buyurtma qabul qilindi!\n\n🆔 Order ID: ${order.orderId}\n📋 ${order.serviceName}\n🔢 Miqdor: ${quantity}\n📊 Status: Pending`,mainKeyboard());
+   }
+  }catch(e){sessions.delete(id);await ctx.reply("❌ Buyurtma xatosi: "+e.message,mainKeyboard())}
+ });
+
+ bot.command("menu",ctx=>ctx.reply("🚀 Asosiy menyu:",mainKeyboard()));
  app.use(WEBHOOK_PATH,bot.webhookCallback(WEBHOOK_PATH));
 }
+
 app.listen(PORT,async()=>{console.log("SMM Bot running on "+PORT);if(bot&&APP_URL){try{await bot.telegram.setWebhook(APP_URL+WEBHOOK_PATH);console.log("Telegram webhook enabled")}catch(e){console.error("Telegram webhook error:",e.message)}}});
 mongoose.connect(process.env.MONGODB_URI).then(()=>console.log("MongoDB connected")).catch(e=>console.error("MongoDB error:",e.message));
 process.once("SIGINT",()=>bot?.stop("SIGINT"));process.once("SIGTERM",()=>bot?.stop("SIGTERM"));
