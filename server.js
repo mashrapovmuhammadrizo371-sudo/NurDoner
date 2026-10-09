@@ -58,11 +58,8 @@ bot.command("menu", async (ctx) => {
 });
 
 bot.hears("🤖 BOT YARATISH", async (ctx) => {
-  sessions.set(ctx.from.id, { step: "bot_token" });
-  await ctx.reply(
-    "🤖 Yangi bot yaratish\n\n1) @BotFather orqali yaratgan botingizning API tokenini yuboring.\n2) Keyin Kino, Download yoki SMM turini tanlaysiz.\n\n⚠️ Token maxfiy kalit. Uni faqat o‘zingizga tegishli bot uchun yuboring. Token chat xabaridan o‘chirib tashlashga urinaman.",
-    Markup.keyboard([["⬅️ MENYUGA QAYTISH"]]).resize()
-  );
+  sessions.set(ctx.from.id, { step: "choose_type" });
+  await ctx.reply("🤖 Qanday bot yaratmoqchisiz? Quyidagi inline tugmalardan birini tanlang:", typeKeyboard());
 });
 
 bot.hears("💰 BALANS", async (ctx) => {
@@ -113,7 +110,12 @@ bot.action(/^create_(kino|download|smm)$/, async (ctx) => {
   await ctx.answerCbQuery();
   const session = sessions.get(ctx.from.id);
   if (!session?.token) {
-    await ctx.reply("Token topilmadi. Iltimos, 🤖 BOT YARATISH tugmasidan qayta boshlang.", mainKeyboard());
+    sessions.set(ctx.from.id, { step: "bot_token", type: ctx.match[1] });
+    const labels = { kino: "🎬 KINO BOT", download: "📥 DOWNLOAD BOT", smm: "📢 SMM BOT" };
+    await ctx.reply(
+      `Siz ${labels[ctx.match[1]]}ni tanladingiz. Endi @BotFather orqali yaratgan o‘zingizga tegishli bot tokenini yuboring. Token maxfiy; uni hech kim bilan ulashmang.`,
+      Markup.keyboard([["⬅️ MENYUGA QAYTISH"]]).resize()
+    );
     return;
   }
   const types = {
