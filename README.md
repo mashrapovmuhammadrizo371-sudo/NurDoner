@@ -1,16 +1,18 @@
-# VEXORA BOT — 3-in-1 Telegram bot
+# VEXORA BOT
 
-Starter project for a single Telegram bot with inline menu sections:
-- 📢 SMM BOT
-- 📥 VIDEO DOWNLOAD BOT
-- 🎬 KINO BOT
+Telegram 3-in-1 bot starter: SMM request intake, direct public MP4 link handling, and movie search through TMDB.
 
-## Run
-1. Copy `.env.example` to `.env` and fill in `BOT_TOKEN`.
-2. Install dependencies with `npm install`.
-3. Run with `npm start`.
+## Setup
 
-Set environment variables in Render rather than committing `.env` or real secrets.
+1. Create a Telegram bot with @BotFather and copy its token.
+2. In Render, set `BOT_TOKEN`.
+3. Set `ADMIN_IDS` to comma-separated numeric Telegram user IDs for SMM request notifications.
+4. Optional: set `TMDB_API_KEY` to enable movie search.
+5. Deploy as a Render Web Service with build command `npm install` and start command `npm start`.
 
-## Current status
-The inline menu, health endpoint, and TMDB movie search integration are starter features. SMM ordering and video downloading require a selected provider/API and should only be enabled for services and media you are authorized to use. No real API keys are included.
+## Current MVP limits
+
+- SMM requests are forwarded to admins; no paid SMM provider is connected.
+- Video handling accepts only direct HTTPS links ending in `.mp4`; it does not bypass platform restrictions.
+- Movie search returns TMDB metadata only; it does not distribute copyrighted films.
+- User conversation state is in memory and resets when the service restarts.
