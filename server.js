@@ -106,48 +106,58 @@ bot.action("cancel_create", async (ctx) => {
   await ctx.reply("Bot yaratish bekor qilindi.", mainKeyboard());
 });
 
-bot.action(/^create_(kino|download|smm)$/, async (ctx) => {
-  await ctx.answerCbQuery();
-  const session = sessions.get(ctx.from.id);
-  if (!session?.token) {
-    sessions.set(ctx.from.id, { step: "bot_token", type: ctx.match[1] });
-    const labels = { kino: "🎬 KINO BOT", download: "📥 DOWNLOAD BOT", smm: "📢 SMM BOT" };
-    await ctx.reply(
-      `Siz ${labels[ctx.match[1]]}ni tanladingiz. Endi @BotFather orqali yaratgan o‘zingizga tegishli bot tokenini yuboring. Token maxfiy; uni hech kim bilan ulashmang.`,
-      Markup.keyboard([["⬅️ MENYUGA QAYTISH"]]).resize()
-    );
-    return;
-  }
+async function createSelectedBot(ctx, session, type) {
   const types = {
-    kino: { label: "Kino bot", emoji: "🎬" },
-    download: { label: "Download bot", emoji: "📥" },
-    smm: { label: "SMM bot", emoji: "📢" }
+    kino: { label: "Kino bot" },
+    download: { label: "Download bot" },
+    smm: { label: "SMM bot" }
   };
-  const type = ctx.match[1];
-  await ctx.reply(`⏳ ${types[type].label} sozlanmoqda. Token tekshiriladi...`);
+  const selected = types[type];
+  if (!selected || !session?.token) {
+    sessions.set(ctx.from.id, { step: "choose_type" });
+    return ctx.reply("Avval bot turini tanlang.", typeKeyboard());
+  }
+
+  await ctx.reply(`⏳ ${selected.label} ishga tushirilmoqda. Token tekshirilmoqda...`);
   try {
     const record = await launchUserBot({
       token: session.token,
       ownerId: ctx.from.id,
       type,
-      typeLabel: types[type].label
+      typeLabel: selected.label
     });
     const list = userBots(ctx.from.id);
     list.push(record);
     createdBots.set(ctx.from.id, list);
     sessions.delete(ctx.from.id);
     await ctx.reply(
-      `✅ Bot ishga tushdi!\n\nNomi: ${record.name}\nUsername: @${record.username}\nTuri: ${types[type].label}\n\nSinash uchun @${record.username} ni ochib /start bosing.\n\nEslatma: bu sinov versiyasida botlar xotirada ishlaydi; NEXBOT qayta ishga tushsa, tokenni qayta ulash kerak bo‘ladi.`,
+      `✅ Bot muvaffaqiyatli ishga tushdi!\\n\\nNomi: ${record.name}\\nUsername: @${record.username}\\nTuri: ${selected.label}\\n\\nSinash uchun @${record.username} ni ochib /start bosing.`,
       mainKeyboard()
     );
   } catch (error) {
     console.error("User bot setup failed:", error?.message || "unknown error");
-    sessions.set(ctx.from.id, { step: "bot_token" });
+    sessions.set(ctx.from.id, { step: "bot_token", type, token: undefined });
     await ctx.reply(
-      "❌ Botni ishga tushirib bo‘lmadi. Token noto‘g‘ri bo‘lishi, bot allaqachon boshqa joyda polling qilayotgani yoki Telegram ulanishida muammo bo‘lishi mumkin. Tokenni tekshirib, qayta yuboring.",
+      "❌ Bot ishga tushmadi. Token noto‘g‘ri bo‘lishi yoki bot boshqa joyda ishga tushirilgan bo‘lishi mumkin. Tokenni tekshirib qayta yuboring. Tokenni hech kimga bermang.",
       Markup.keyboard([["⬅️ MENYUGA QAYTISH"]]).resize()
     );
   }
+}
+
+bot.action(/^create_(kino|download|smm)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const type = ctx.match[1];
+  const session = sessions.get(ctx.from.id);
+  if (!session?.token) {
+    sessions.set(ctx.from.id, { step: "bot_token", type });
+    const labels = { kino: "🎬 KINO BOT", download: "📥 DOWNLOAD BOT", smm: "📢 SMM BOT" };
+    await ctx.reply(
+      `Siz ${labels[type]}ni tanladingiz. Endi @BotFather orqali yaratgan o‘zingizga tegishli bot tokenini yuboring. Token maxfiy; uni hech kim bilan ulashmang.`,
+      Markup.keyboard([["⬅️ MENYUGA QAYTISH"]]).resize()
+    );
+    return;
+  }
+  return createSelectedBot(ctx, session, type);
 });
 
 async function launchUserBot({ token, ownerId, type, typeLabel }) {
@@ -241,15 +251,19 @@ bot.on("text", async (ctx) => {
   if (input.startsWith("/")) return;
 
   if (session.step === "bot_token") {
-    // Best-effort removal so the token is not left visible in the chat.
+    // Delete the message containing the secret token when Telegram permits it.
     try { await ctx.deleteMessage(); } catch { /* Telegram may refuse message deletion. */ }
     if (input.length < 30 || !input.includes(":")) {
-      return ctx.reply("Bu token formatiga o‘xshamaydi. @BotFather bergan tokenni qayta tekshiring.", mainKeyboard());
+      return ctx.reply("Token formati noto‘g‘ri ko‘rinadi. @BotFather bergan tokenni qayta tekshiring va yuboring.");
     }
     session.token = input;
-    session.step = "bot_type";
+    const selectedType = session.type;
     sessions.set(ctx.from.id, session);
-    return ctx.reply("Qaysi turdagi bot yaratamiz?", typeKeyboard());
+    if (!selectedType) {
+      sessions.set(ctx.from.id, { step: "choose_type", token: input });
+      return ctx.reply("Token qabul qilindi. Endi bot turini tanlang:", typeKeyboard());
+    }
+    return createSelectedBot(ctx, session, selectedType);
   }
 
   if (session.step === "topup_amount") {
