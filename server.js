@@ -124,59 +124,94 @@ function registerChildHandlers(child, { token, ownerId, type, id, secretToken, r
   const movies = Array.isArray(record.movies) ? record.movies : [];
   child.start(async (ctx) => {
     const descriptions = {
-      kino: "🎬 Kino botga xush kelibsiz!\n\nKinolarni qidirish: /search nom\nKinolar ro‘yxati: /movies\nBot egasi kino qo‘shishi: /addmovie Nom | Tavsif | Havola",
-      download: "📥 Download botga xush kelibsiz!\n\nOchiq, to‘g‘ridan-to‘g‘ri HTTPS MP4 havolasini yuboring. Platforma cheklovlarini aylanib o‘tish qo‘llab-quvvatlanmaydi.",
-      smm: "📢 SMM botga xush kelibsiz!\n\nBuyurtma yuborish uchun xizmat turi, sahifa havolasi va miqdorni bitta xabarda yozing."
+      kino: "🎬 Kino botga xush kelibsiz!\n\nBuyruqlar:\n/movies — barcha kinolar\n/search nom — kino qidirish\n/help — yordam\n\nBot egasi kino qo‘shishi:\n/addmovie Nom | Tavsif | https://havola",
+      download: "📥 Download botga xush kelibsiz!\n\nOchiq, to‘g‘ridan-to‘g‘ri video havolasini yuboring. HTTPS havola bo‘lishi kerak va video Telegram tomonidan olinishi mumkin bo‘lishi kerak.\n/help — yordam",
+      smm: "📢 SMM botga xush kelibsiz!\n\nBuyurtma yuborish uchun xizmat turi, sahifa havolasi va miqdorni yozing. Masalan:\nInstagram obunachi | https://instagram.com/... | 100\n/help — yordam"
     };
     await ctx.reply(descriptions[type] || "Bot ishga tayyor.");
   });
+  child.command("help", async (ctx) => {
+    const help = {
+      kino: "🎬 Kino buyruqlari:\n/movies — kino ro‘yxati\n/search nom — qidirish\n/addmovie Nom | Tavsif | https://havola — kino qo‘shish (faqat egasi)",
+      download: "📥 Video yuklash:\nOchiq HTTPS video havolasini yuboring. Havola login talab qilmasligi va Telegram tomonidan ochilishi kerak. Bu bot yopiq saytlar cheklovini aylanib o‘tmaydi.",
+      smm: "📢 SMM buyurtmasi:\nXizmat turi | Sahifa havolasi | Miqdor\nMisol: Instagram obunachi | https://instagram.com/example | 100"
+    };
+    await ctx.reply(help[type] || "Yordam uchun bot egasiga murojaat qiling.");
+  });
+
   if (type === "kino") {
     child.command("addmovie", async (ctx) => {
       if (ctx.from.id !== ownerId) return ctx.reply("Kino qo‘shish faqat bot egasiga ruxsat etilgan.");
-      const parts = ctx.message.text.replace(/^\/addmovie\s*/i, "").split("|").map((part) => part.trim());
-      if (parts.length < 3 || !parts[0] || !parts[1] || !/^https:\/\//i.test(parts[2])) return ctx.reply("Format: /addmovie Kino nomi | Tavsif | https://havola");
-      const movie = { title: parts[0], description: parts[1], url: parts.slice(2).join(" | ") };
-      movies.push(movie);
+      const parts = ctx.message.text.replace(/^\/addmovie(?:@\w+)?\s*/i, "").split("|").map((part) => part.trim());
+      if (parts.length < 3 || !parts[0] || !parts[1]) return ctx.reply("Format:\n/addmovie Kino nomi | Tavsif | https://havola");
+      let parsed;
+      try { parsed = new URL(parts.slice(2).join(" | ")); } catch {}
+      if (!parsed || parsed.protocol !== "https:") return ctx.reply("Havola https:// bilan boshlanishi kerak.");
+      const existing = movies.findIndex((movie) => movie.title.toLowerCase() === parts[0].toLowerCase());
+      const movie = { title: parts[0], description: parts[1], url: parsed.href };
+      if (existing >= 0) movies[existing] = movie;
+      else movies.push(movie);
       await botRecords.updateOne({ id }, { $set: { movies } });
-      return ctx.reply("✅ “" + movie.title + "” ro‘yxatga qo‘shildi.");
+      return ctx.reply("✅ “" + movie.title + "” " + (existing >= 0 ? "yangilandi." : "kinolar ro‘yxatiga qo‘shildi."));
     });
     child.command("movies", async (ctx) => {
-      if (!movies.length) return ctx.reply("Hozircha kino qo‘shilmagan.");
-      return ctx.reply(movies.map((movie, index) => (index + 1) + ". " + movie.title).join("\n"));
+      if (!movies.length) return ctx.reply("Hozircha kino qo‘shilmagan.\nBot egasidan kino qo‘shishni so‘rang.");
+      const lines = movies.map((movie, index) => (index + 1) + ". " + movie.title);
+      return ctx.reply("🎬 Kinolar (" + movies.length + "):\n\n" + lines.join("\n") + "\n\nKino qidirish: /search nom");
     });
     child.command("search", async (ctx) => {
-      const query = ctx.message.text.replace(/^\/search\s*/i, "").trim().toLowerCase();
+      const query = ctx.message.text.replace(/^\/search(?:@\w+)?\s*/i, "").trim().toLocaleLowerCase();
       if (!query) return ctx.reply("Qidirish uchun: /search kino nomi");
-      const found = movies.filter((movie) => movie.title.toLowerCase().includes(query)).slice(0, 5);
-      if (!found.length) return ctx.reply("Kino topilmadi.");
-      for (const movie of found) await ctx.reply("🎬 " + movie.title + "\n\n" + movie.description + "\n\nHavola: " + movie.url);
+      const found = movies.filter((movie) => movie.title.toLocaleLowerCase().includes(query)).slice(0, 5);
+      if (!found.length) return ctx.reply("🔎 Kino topilmadi. Nomini boshqacha yozib ko‘ring.");
+      for (const movie of found) {
+        const keyboard = Markup.inlineKeyboard([[Markup.button.url("▶️ Ko‘rish", movie.url)]]);
+        await ctx.reply("🎬 " + movie.title + "\n\n" + movie.description, keyboard);
+      }
     });
   }
+
   if (type === "download") {
     child.on("text", async (ctx) => {
       const input = ctx.message.text.trim();
       if (input.startsWith("/")) return;
       let url;
-      try { url = new URL(input); } catch { return ctx.reply("To‘liq HTTPS MP4 havolasini yuboring."); }
-      if (url.protocol !== "https:" || !/\.mp4$/i.test(url.pathname)) return ctx.reply("Faqat ochiq, to‘g‘ridan-to‘g‘ri HTTPS .mp4 havolasi qabul qilinadi.");
-      try { await ctx.replyWithVideo(url.href); }
-      catch { await ctx.reply("Videoni olishning iloji bo‘lmadi. Havola to‘g‘ridan-to‘g‘ri ochilishini tekshiring."); }
+      try { url = new URL(input); } catch { return ctx.reply("Video havolasini to‘liq yuboring (https://...)."); }
+      if (url.protocol !== "https:") return ctx.reply("Xavfsizlik uchun faqat HTTPS havolalar qabul qilinadi.");
+      if (!/\.(mp4|m4v|mov|webm)$/i.test(url.pathname)) {
+        return ctx.reply("Bu havola to‘g‘ridan-to‘g‘ri video faylga o‘xshamayapti. .mp4, .m4v, .mov yoki .webm fayl havolasini yuboring. YouTube/TikTok kabi sahifa havolalari bevosita yuklanmasligi mumkin.");
+      }
+      await ctx.reply("⏳ Video tekshirilmoqda...");
+      try {
+        await ctx.replyWithVideo({ url: url.href }, { supports_streaming: true });
+      } catch (error) {
+        console.error("Download bot video error:", error?.message || "unknown error");
+        await ctx.reply("❌ Telegram bu videoni havoladan ola olmadi. Havola ochiq, to‘g‘ridan-to‘g‘ri video fayl ekanini va hajmi Telegram cheklovidan oshmasligini tekshiring.");
+      }
     });
   }
+
   if (type === "smm") {
     child.on("text", async (ctx) => {
       const input = ctx.message.text.trim();
       if (input.startsWith("/")) return;
+      if (input.length < 8) return ctx.reply("Buyurtmani batafsilroq yozing:\nXizmat turi | Sahifa havolasi | Miqdor");
+      const request = "📢 Yangi SMM so‘rovi\nBot: @" + me.username +
+        "\nFoydalanuvchi ID: " + ctx.from.id +
+        "\nUsername: @" + (ctx.from.username || "yo‘q") +
+        "\n\nSo‘rov:\n" + input;
       try {
-        await child.telegram.sendMessage(ownerId, "📢 Yangi SMM so‘rovi\nBot: @" + me.username + "\nFoydalanuvchi ID: " + ctx.from.id + "\nUsername: @" + (ctx.from.username || "yo‘q") + "\n\nSo‘rov: " + input);
-        await ctx.reply("✅ So‘rovingiz bot egasiga yuborildi.");
-      } catch { await ctx.reply("So‘rovni yuborib bo‘lmadi. Keyinroq urinib ko‘ring."); }
+        await child.telegram.sendMessage(ownerId, request);
+        await ctx.reply("✅ So‘rovingiz bot egasiga yuborildi. Javobni kuting.");
+      } catch (error) {
+        console.error("SMM owner notification failed:", error?.message || "unknown error");
+        await ctx.reply("❌ Buyurtmani egasiga yuborib bo‘lmadi. Bot egasi ushbu botni Telegram’da bir marta ochib /start bosganini tekshirsin.");
+      }
     });
   }
   child.catch((error) => console.error("Created bot error:", error?.message || "unknown error"));
   return { bot: child, secretToken, token, id, ownerId, type };
 }
-
 async function startSavedBot(record, token) {
   const child = new Telegraf(token);
   const entry = registerChildHandlers(child, {
