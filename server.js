@@ -139,6 +139,19 @@ function registerChildHandlers(child, { token, ownerId, type, id, secretToken, r
     await ctx.reply(help[type] || "Yordam uchun bot egasiga murojaat qiling.");
   });
 
+  // The Telegram user who submitted the token is the owner/admin of this created bot.
+  child.command("admin", async (ctx) => {
+    if (ctx.from.id !== ownerId) {
+      return ctx.reply("⛔ Bu bo‘lim faqat bot egasi uchun.");
+    }
+    const controls = {
+      kino: "🎬 KINO BOT — EGASI PANELI\n\n/addmovie Nom | Tavsif | https://havola — kino qo‘shish\n/movies — ro‘yxatni ko‘rish\n/search nom — kino qidirish",
+      download: "📥 DOWNLOAD BOT — EGASI PANELI\n\nSiz ushbu bot egasisiz. Foydalanuvchilar yuborgan ochiq video havolalarini bot qayta yuboradi. Bu bot havolalarning xavfsizligi yoki mualliflik huquqini chetlab o‘tishni ta’minlamaydi.",
+      smm: "📢 SMM BOT — EGASI PANELI\n\nFoydalanuvchilar yuborgan buyurtmalar Sizga Telegram orqali keladi. Bot ishlashi uchun Siz avval ushbu botga /start yuborgan bo‘lishingiz kerak."
+    };
+    await ctx.reply(controls[type] || "Bot egasi paneli.");
+  });
+
   if (type === "kino") {
     child.command("addmovie", async (ctx) => {
       if (ctx.from.id !== ownerId) return ctx.reply("Kino qo‘shish faqat bot egasiga ruxsat etilgan.");
