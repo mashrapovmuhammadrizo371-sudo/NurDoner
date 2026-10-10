@@ -153,34 +153,288 @@ function registerChildHandlers(child, { token, ownerId, type, id, secretToken, r
   });
 
   if (type === "kino") {
-    child.command("addmovie", async (ctx) => {
-      if (ctx.from.id !== ownerId) return ctx.reply("Kino qo‘shish faqat bot egasiga ruxsat etilgan.");
-      const parts = ctx.message.text.replace(/^\/addmovie(?:@\w+)?\s*/i, "").split("|").map((part) => part.trim());
-      if (parts.length < 3 || !parts[0] || !parts[1]) return ctx.reply("Format:\n/addmovie Kino nomi | Tavsif | https://havola");
-      let parsed;
-      try { parsed = new URL(parts.slice(2).join(" | ")); } catch {}
-      if (!parsed || parsed.protocol !== "https:") return ctx.reply("Havola https:// bilan boshlanishi kerak.");
-      const existing = movies.findIndex((movie) => movie.title.toLowerCase() === parts[0].toLowerCase());
-      const movie = { title: parts[0], description: parts[1], url: parsed.href };
-      if (existing >= 0) movies[existing] = movie;
-      else movies.push(movie);
-      await botRecords.updateOne({ id }, { $set: { movies } });
-      return ctx.reply("✅ “" + movie.title + "” " + (existing >= 0 ? "yangilandi." : "kinolar ro‘yxatiga qo‘shildi."));
-    });
-    child.command("movies", async (ctx) => {
-      if (!movies.length) return ctx.reply("Hozircha kino qo‘shilmagan.\nBot egasidan kino qo‘shishni so‘rang.");
-      const lines = movies.map((movie, index) => (index + 1) + ". " + movie.title);
-      return ctx.reply("🎬 Kinolar (" + movies.length + "):\n\n" + lines.join("\n") + "\n\nKino qidirish: /search nom");
-    });
-    child.command("search", async (ctx) => {
-      const query = ctx.message.text.replace(/^\/search(?:@\w+)?\s*/i, "").trim().toLocaleLowerCase();
-      if (!query) return ctx.reply("Qidirish uchun: /search kino nomi");
-      const found = movies.filter((movie) => movie.title.toLocaleLowerCase().includes(query)).slice(0, 5);
-      if (!found.length) return ctx.reply("🔎 Kino topilmadi. Nomini boshqacha yozib ko‘ring.");
-      for (const movie of found) {
-        const keyboard = Markup.inlineKeyboard([[Markup.button.url("▶️ Ko‘rish", movie.url)]]);
-        await ctx.reply("🎬 " + movie.title + "\n\n" + movie.description, keyboard);
+    const adminState = new Map();
+    const customers = Array.isArray(record.customers) ? record.customers : [];
+    const channels = Array.isArray(record.channels) ? record.channels : [];
+    const premiumPlans = Array.isArray(record.premiumPlans) ? record.premiumPlans : [];
+    const premiumUsers = Array.isArray(record.premiumUsers) ? record.premiumUsers : [];
+    const movieViews = Array.isArray(record.movieViews) ? record.movieViews : [];
+    const admins = Array.isArray(record.admins) ? record.admins : [{ userId: ownerId, role: "owner" }];
+
+    const isAdmin = (userId) => admins.some((admin) => admin.userId === userId) || userId === ownerId;
+    const saveField = async (field, value) => {
+      record[field] = value;
+      await botRecords.updateOne({ id }, { $set: { [field]: value } });
+    };
+    const rememberCustomer = async (from) => {
+      if (!from?.id) return;
+      const found = customers.find((user) => user.userId === from.id);
+      const entry = {
+        userId: from.id,
+        username: from.username || "",
+        firstName: from.first_name || "",
+        lastName: from.last_name || "",
+        firstSeen: found?.firstSeen || new Date().toISOString(),
+        lastSeen: new Date().toISOString(),
+        interactions: (found?.interactions || 0) + 1
+      };
+      if (found) Object.assign(found, entry);
+      else customers.push(entry);
+      await saveField("customers", customers);
+    };
+    const adminKeyboard = () => Markup.inlineKeyboard([
+      [Markup.button.callback("🎬 Kino qo‘shish", "kino:add"), Markup.button.callback("📊 Statistika", "kino:stats")],
+      [Markup.button.callback("📢 Majburiy kanal", "kino:channels"), Markup.button.callback("🔎 Mijozni ID orqali qidirish", "kino:user")],
+      [Markup.button.callback("👑 Premium tariflar", "kino:premium"), Markup.button.callback("📚 Kinolar ro‘yxati", "kino:list")],
+      [Markup.button.callback("❌ Kino o‘chirish", "kino:delete")]
+    ]);
+    const customerHasChannels = async (ctx) => {
+      for (const channel of channels) {
+        try {
+          const member = await child.telegram.getChatMember(channel.chatId, ctx.from.id);
+          if (["left", "kicked"].includes(member.status)) return channel;
+        } catch (error) {
+          console.error("Channel membership check failed:", error?.message || "unknown error");
+          return { ...channel, checkFailed: true };
+        }
       }
+      return null;
+    };
+
+    child.command("admin", async (ctx) => {
+      if (!isAdmin(ctx.from.id)) return ctx.reply("⛔ Admin paneliga kirish uchun ruxsatingiz yo‘q.");
+      await rememberCustomer(ctx.from);
+      return ctx.reply("🎬 KINO BOT — ADMIN PANELI\nKerakli bo‘limni tanlang:", adminKeyboard());
+    });
+    child.command("addmovie", async (ctx) => {
+      if (!isAdmin(ctx.from.id)) return ctx.reply("⛔ Bu amal faqat adminlar uchun.");
+      adminState.set(ctx.from.id, { step: "movie_code" });
+      return ctx.reply("Kino uchun takrorlanmaydigan kodni yuboring (masalan, 58321). Bekor qilish: /cancel");
+    });
+    child.command("cancel", async (ctx) => {
+      adminState.delete(ctx.from.id);
+      return ctx.reply("Jarayon bekor qilindi.");
+    });
+
+    child.action("kino:add", async (ctx) => {
+      await ctx.answerCbQuery();
+      if (!isAdmin(ctx.from.id)) return ctx.reply("⛔ Ruxsat yo‘q.");
+      adminState.set(ctx.from.id, { step: "movie_code" });
+      return ctx.reply("Kino uchun takrorlanmaydigan kodni yuboring (masalan, 58321). Bekor qilish: /cancel");
+    });
+    child.action("kino:stats", async (ctx) => {
+      await ctx.answerCbQuery();
+      if (!isAdmin(ctx.from.id)) return ctx.reply("⛔ Ruxsat yo‘q.");
+      const active = movies.filter((movie) => movie.status === "active").length;
+      const pending = movies.filter((movie) => movie.status === "pending").length;
+      const totalViews = movieViews.reduce((sum, item) => sum + (item.count || 0), 0);
+      return ctx.reply("📊 KINO BOT STATISTIKASI\n\n👥 Mijozlar: " + customers.length +
+        "\n🎬 Faol kinolar: " + active + "\n⏳ Tugallanmagan kinolar: " + pending +
+        "\n▶️ Kino yuborilgan: " + totalViews + "\n📢 Majburiy kanallar: " + channels.length +
+        "\n👑 Premium mijozlar: " + premiumUsers.filter((u) => new Date(u.expiresAt).getTime() > Date.now()).length);
+    });
+    child.action("kino:channels", async (ctx) => {
+      await ctx.answerCbQuery();
+      if (!isAdmin(ctx.from.id)) return ctx.reply("⛔ Ruxsat yo‘q.");
+      adminState.set(ctx.from.id, { step: "channel" });
+      const list = channels.length ? channels.map((ch, i) => (i + 1) + ". " + ch.title + " (" + ch.chatId + ")").join("\n") : "Hozircha kanal qo‘shilmagan.";
+      return ctx.reply("📢 MAJBURIY KANALLAR\n" + list + "\n\nKanalni qo‘shish uchun @username yoki kanal ID sini yuboring. Bot kanalda admin bo‘lishi kerak.\nKanalni olib tashlash: /delchannel CHANNEL_ID\nBekor qilish: /cancel");
+    });
+    child.command("delchannel", async (ctx) => {
+      if (!isAdmin(ctx.from.id)) return ctx.reply("⛔ Ruxsat yo‘q.");
+      const chatId = ctx.message.text.split(/\s+/)[1];
+      if (!chatId) return ctx.reply("Format: /delchannel @username yoki CHANNEL_ID");
+      const target = channels.find((ch) => String(ch.chatId) === chatId || ch.username === chatId.replace(/^@/, ""));
+      if (!target) return ctx.reply("Kanal ro‘yxatdan topilmadi.");
+      const next = channels.filter((ch) => ch !== target);
+      await saveField("channels", next);
+      channels.splice(0, channels.length, ...next);
+      return ctx.reply("✅ Majburiy kanal o‘chirildi.");
+    });
+    child.action("kino:user", async (ctx) => {
+      await ctx.answerCbQuery();
+      if (!isAdmin(ctx.from.id)) return ctx.reply("⛔ Ruxsat yo‘q.");
+      adminState.set(ctx.from.id, { step: "user_id" });
+      return ctx.reply("🔎 Mijozning Telegram ID raqamini yuboring. Bekor qilish: /cancel");
+    });
+    child.action("kino:premium", async (ctx) => {
+      await ctx.answerCbQuery();
+      if (!isAdmin(ctx.from.id)) return ctx.reply("⛔ Ruxsat yo‘q.");
+      adminState.set(ctx.from.id, { step: "premium_menu" });
+      const plans = premiumPlans.length ? premiumPlans.map((p) => "• " + p.name + " — " + p.price + " so‘m / " + p.days + " kun").join("\n") : "Tariflar hali yaratilmagan.";
+      return ctx.reply("👑 PREMIUM TARIFLAR\n" + plans + "\n\nTarif yaratish: /addplan Nomi | Narxi | Kun\nMijozga premium berish: /givepremium USER_ID KUN\nPremium holatini tekshirish: /checkpremium USER_ID");
+    });
+    child.command("addplan", async (ctx) => {
+      if (!isAdmin(ctx.from.id)) return ctx.reply("⛔ Ruxsat yo‘q.");
+      const parts = ctx.message.text.replace(/^\/addplan(?:@\w+)?\s*/i, "").split("|").map((p) => p.trim());
+      const price = Number(parts[1]);
+      const days = Number(parts[2]);
+      if (!parts[0] || !Number.isSafeInteger(price) || price < 0 || !Number.isSafeInteger(days) || days < 1) {
+        return ctx.reply("Format: /addplan Nomi | Narxi | Kun\nMisol: /addplan Premium | 25000 | 30");
+      }
+      const existing = premiumPlans.findIndex((p) => p.name.toLowerCase() === parts[0].toLowerCase());
+      const plan = { name: parts[0], price, days };
+      if (existing >= 0) premiumPlans[existing] = plan;
+      else premiumPlans.push(plan);
+      await saveField("premiumPlans", premiumPlans);
+      return ctx.reply("✅ Premium tarifi saqlandi: " + plan.name + " — " + plan.price + " so‘m / " + plan.days + " kun.");
+    });
+    child.command("givepremium", async (ctx) => {
+      if (!isAdmin(ctx.from.id)) return ctx.reply("⛔ Ruxsat yo‘q.");
+      const parts = ctx.message.text.split(/\s+/);
+      const userId = Number(parts[1]);
+      const days = Number(parts[2]);
+      if (!Number.isSafeInteger(userId) || !Number.isSafeInteger(days) || days < 1) return ctx.reply("Format: /givepremium USER_ID KUN");
+      const old = premiumUsers.find((u) => u.userId === userId);
+      const now = Date.now();
+      const base = old && new Date(old.expiresAt).getTime() > now ? new Date(old.expiresAt).getTime() : now;
+      const entry = { userId, expiresAt: new Date(base + days * 86400000).toISOString(), grantedBy: ctx.from.id };
+      if (old) Object.assign(old, entry); else premiumUsers.push(entry);
+      await saveField("premiumUsers", premiumUsers);
+      return ctx.reply("✅ " + userId + " uchun premium " + days + " kunga berildi.");
+    });
+    child.command("checkpremium", async (ctx) => {
+      if (!isAdmin(ctx.from.id)) return ctx.reply("⛔ Ruxsat yo‘q.");
+      const userId = Number(ctx.message.text.split(/\s+/)[1]);
+      if (!Number.isSafeInteger(userId)) return ctx.reply("Format: /checkpremium USER_ID");
+      const item = premiumUsers.find((u) => u.userId === userId);
+      const active = item && new Date(item.expiresAt).getTime() > Date.now();
+      return ctx.reply(active ? "👑 Premium faol. Tugash vaqti: " + item.expiresAt : "Premium faol emas.");
+    });
+    child.action("kino:list", async (ctx) => {
+      await ctx.answerCbQuery();
+      if (!isAdmin(ctx.from.id)) return ctx.reply("⛔ Ruxsat yo‘q.");
+      if (!movies.length) return ctx.reply("Kinolar hali yo‘q.");
+      return ctx.reply("📚 KINOLAR\n\n" + movies.map((m) => "• " + m.code + " — " + (m.title || "Nomsiz") + " [" + m.status + "]").join("\n"));
+    });
+    child.action("kino:delete", async (ctx) => {
+      await ctx.answerCbQuery();
+      if (!isAdmin(ctx.from.id)) return ctx.reply("⛔ Ruxsat yo‘q.");
+      adminState.set(ctx.from.id, { step: "delete_movie" });
+      return ctx.reply("O‘chiriladigan kino kodini yuboring. Bekor qilish: /cancel");
+    });
+
+    child.on("video", async (ctx) => {
+      await rememberCustomer(ctx.from);
+      const state = adminState.get(ctx.from.id);
+      if (!isAdmin(ctx.from.id) || state?.step !== "movie_video") return;
+      const movie = movies.find((item) => item.code === state.code);
+      if (!movie) {
+        adminState.delete(ctx.from.id);
+        return ctx.reply("❌ Kino kodi topilmadi. /admin orqali qaytadan boshlang.");
+      }
+      movie.fileId = ctx.message.video.file_id;
+      movie.fileUniqueId = ctx.message.video.file_unique_id;
+      movie.status = "active";
+      movie.updatedAt = new Date().toISOString();
+      movie.createdBy = ctx.from.id;
+      await saveField("movies", movies);
+      adminState.delete(ctx.from.id);
+      return ctx.reply("✅ Kino saqlandi!\nKod: " + movie.code + "\nHolati: Faol\nMijozlar shu kodni yuborib videoni olishlari mumkin.");
+    });
+    child.on("document", async (ctx) => {
+      const state = adminState.get(ctx.from.id);
+      const doc = ctx.message.document;
+      if (!isAdmin(ctx.from.id) || state?.step !== "movie_video") return;
+      if (!doc.mime_type?.startsWith("video/")) return ctx.reply("Video fayl yuboring. Oddiy hujjat qabul qilinmaydi.");
+      const movie = movies.find((item) => item.code === state.code);
+      if (!movie) return ctx.reply("Kino kodi topilmadi. /admin orqali qaytadan boshlang.");
+      movie.fileId = doc.file_id;
+      movie.fileUniqueId = doc.file_unique_id;
+      movie.status = "active";
+      movie.updatedAt = new Date().toISOString();
+      movie.createdBy = ctx.from.id;
+      await saveField("movies", movies);
+      adminState.delete(ctx.from.id);
+      return ctx.reply("✅ Kino videosi saqlandi!\nKod: " + movie.code + "\nHolati: Faol.");
+    });
+
+    child.on("text", async (ctx) => {
+      const input = ctx.message.text.trim();
+      if (input.startsWith("/")) return;
+      await rememberCustomer(ctx.from);
+      const state = adminState.get(ctx.from.id);
+      if (state && isAdmin(ctx.from.id)) {
+        if (state.step === "movie_code") {
+          if (!/^[A-Za-z0-9_-]{2,32}$/.test(input)) return ctx.reply("Kod 2–32 belgidan iborat bo‘lsin: harf, raqam, _ yoki -.");
+          if (movies.some((movie) => movie.code.toLowerCase() === input.toLowerCase())) return ctx.reply("❌ Bu kod band. Boshqa kod kiriting.");
+          const movie = { code: input, status: "pending", title: "", fileId: "", createdBy: ctx.from.id, createdAt: new Date().toISOString() };
+          movies.push(movie);
+          await saveField("movies", movies);
+          adminState.set(ctx.from.id, { step: "movie_video", code: input });
+          return ctx.reply("✅ Kod band qilindi: " + input + "\nEndi kinoning video faylini shu chatga yuboring. Video yuborilmaguncha kino mijozlarga ko‘rinmaydi.\nBekor qilish: /cancel");
+        }
+        if (state.step === "user_id") {
+          if (!/^\d+$/.test(input)) return ctx.reply("Telegram ID faqat raqamlardan iborat bo‘lishi kerak.");
+          const userId = Number(input);
+          const user = customers.find((u) => u.userId === userId);
+          const premium = premiumUsers.find((u) => u.userId === userId && new Date(u.expiresAt).getTime() > Date.now());
+          adminState.delete(ctx.from.id);
+          return ctx.reply(user
+            ? "👤 MIJOZ PROFILI\nID: " + user.userId + "\nIsm: " + (user.firstName || "—") + "\nUsername: " + (user.username ? "@" + user.username : "—") + "\nBirinchi faollik: " + user.firstSeen + "\nOxirgi faollik: " + user.lastSeen + "\nMuloqotlar: " + user.interactions + "\nPremium: " + (premium ? "Faol, tugaydi " + premium.expiresAt : "Faol emas")
+            : "Bu mijoz bot bilan hali muloqot qilmagan yoki topilmadi.");
+        }
+        if (state.step === "channel") {
+          const lookup = input.replace(/^@/, "");
+          try {
+            const chat = await child.telegram.getChat(/^-\d+$/.test(input) ? Number(input) : "@" + lookup);
+            const chatId = chat.id;
+            const me = await child.telegram.getMe();
+            const member = await child.telegram.getChatMember(chatId, me.id);
+            if (!["administrator", "creator"].includes(member.status)) return ctx.reply("Bot bu kanalda admin emas. Avval botni kanalga admin qiling.");
+            if (channels.some((ch) => String(ch.chatId) === String(chatId))) {
+              adminState.delete(ctx.from.id);
+              return ctx.reply("Bu kanal allaqachon qo‘shilgan.");
+            }
+            const channel = { chatId, title: chat.title || chat.username || String(chatId), username: chat.username || "", addedBy: ctx.from.id, addedAt: new Date().toISOString() };
+            channels.push(channel);
+            await saveField("channels", channels);
+            adminState.delete(ctx.from.id);
+            return ctx.reply("✅ Majburiy kanal qo‘shildi: " + channel.title + "\nEndi mijozlar obuna bo‘lgandan keyin kino kodini ishlata oladi.");
+          } catch (error) {
+            console.error("Could not add required channel:", error?.message || "unknown error");
+            return ctx.reply("❌ Kanalni topib bo‘lmadi. @username yoki -100... ID ni tekshiring va bot kanalda admin ekanini tasdiqlang.");
+          }
+        }
+        if (state.step === "delete_movie") {
+          const movie = movies.find((item) => item.code.toLowerCase() === input.toLowerCase());
+          if (!movie) return ctx.reply("Bu kod bilan kino topilmadi.");
+          const next = movies.filter((item) => item !== movie);
+          await saveField("movies", next);
+          movies.splice(0, movies.length, ...next);
+          adminState.delete(ctx.from.id);
+          return ctx.reply("✅ " + movie.code + " kodi bilan kino o‘chirildi.");
+        }
+      }
+
+      if (!/^[A-Za-z0-9_-]{2,32}$/.test(input)) return;
+      const movie = movies.find((item) => item.code.toLowerCase() === input.toLowerCase() && item.status === "active" && item.fileId);
+      if (!movie) return ctx.reply("🔎 Bu kod bilan faol kino topilmadi. Kodni tekshirib qayta yuboring.");
+      const blocked = await customerHasChannels(ctx);
+      if (blocked) {
+        if (blocked.checkFailed) return ctx.reply("Kanal obunasini hozir tekshirib bo‘lmadi. Keyinroq qayta urinib ko‘ring.");
+        const joinUrl = blocked.username ? "https://t.me/" + blocked.username : null;
+        const buttons = joinUrl ? Markup.inlineKeyboard([[Markup.button.url("📢 Kanalga obuna bo‘lish", joinUrl)], [Markup.button.callback("✅ Obunani tekshirish", "kino:check_sub")]]) : Markup.inlineKeyboard([[Markup.button.callback("✅ Obunani tekshirish", "kino:check_sub")]]);
+        return ctx.reply("🎬 Kinoni olishdan oldin majburiy kanalga obuna bo‘ling:\n" + blocked.title, buttons);
+      }
+      const premium = premiumUsers.some((u) => u.userId === ctx.from.id && new Date(u.expiresAt).getTime() > Date.now());
+      try {
+        await ctx.replyWithVideo(movie.fileId, { caption: "🎬 " + (movie.title || "Kino") + "\nKod: " + movie.code });
+        const view = movieViews.find((item) => item.code === movie.code);
+        if (view) view.count = (view.count || 0) + 1;
+        else movieViews.push({ code: movie.code, count: 1 });
+        await saveField("movieViews", movieViews);
+        void premium;
+      } catch (error) {
+        console.error("Stored movie delivery failed:", error?.message || "unknown error");
+        return ctx.reply("❌ Videoni yuborib bo‘lmadi. Admin videoni qayta yuklashi kerak bo‘lishi mumkin.");
+      }
+    });
+    child.action("kino:check_sub", async (ctx) => {
+      await ctx.answerCbQuery();
+      const blocked = await customerHasChannels(ctx);
+      if (blocked) return ctx.reply(blocked.checkFailed ? "Obunani tekshirib bo‘lmadi, keyinroq urinib ko‘ring." : "Avval majburiy kanalga obuna bo‘ling.");
+      return ctx.reply("✅ Obuna tasdiqlandi. Endi kino kodini yuboring.");
     });
   }
 
