@@ -223,9 +223,6 @@ async function createSelectedBot(ctx, session, type) {
   await ctx.reply("⏳ " + selected.label + " ishga tushirilmoqda. Token tekshirilmoqda...");
   try {
     const record = await launchUserBot({ token: session.token, ownerId: ctx.from.id, type, typeLabel: selected.label });
-    const list = userBots(ctx.from.id);
-    list.push({ id: record.id, name: record.name, username: record.username, type: record.type, typeLabel: record.typeLabel, createdAt: record.createdAt });
-    createdBots.set(ctx.from.id, list);
     sessions.delete(ctx.from.id);
     await ctx.reply("✅ Bot muvaffaqiyatli ishga tushdi!\n\nNomi: " + record.name + "\nUsername: @" + record.username + "\nTuri: " + selected.label + "\n\nSinash uchun @" + record.username + " ni ochib /start bosing.", mainKeyboard());
   } catch (error) {
@@ -319,10 +316,7 @@ startApp().catch((error) => {
 
 const shutdown = async (signal) => {
   console.log(signal + " received; stopping bots");
-  try { await bot.telegram.deleteWebhook({ drop_pending_updates: false }); } catch {}
-  for (const entry of activeBots.values()) {
-    try { await entry.bot.telegram.deleteWebhook({ drop_pending_updates: false }); } catch {}
-  }
+  // Keep webhooks registered during deploy/restart; deleting them here can race with the new instance.
   server.close(async () => {
     try { await mongo.close(); } catch {}
     process.exit(0);
