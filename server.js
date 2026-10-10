@@ -1,171 +1,127 @@
 import express from "express";
 import { Telegraf, Markup } from "telegraf";
+import { MongoClient } from "mongodb";
+import crypto from "node:crypto";
 
 const TOKEN = process.env.BOT_TOKEN;
+const MONGODB_URI = process.env.MONGODB_URI;
 const ADMIN_IDS = (process.env.ADMIN_IDS || "")
-  .split(",")
-  .map((value) => value.trim())
-  .filter((value) => /^\d+$/.test(value))
-  .map(Number);
+  .split(",").map((value) => value.trim())
+  .filter((value) => /^\d+$/.test(value)).map(Number);
 const PORT = Number(process.env.PORT || 10000);
+const BASE_URL = (process.env.RENDER_EXTERNAL_URL || "https://nurdoner.onrender.com").replace(/\/+$/, "");
 
 if (!TOKEN) {
   console.error("BOT_TOKEN is missing. Add it in Render Environment.");
   process.exit(1);
 }
+if (!MONGODB_URI) {
+  console.error("MONGODB_URI is missing. Add it in Render Environment.");
+  process.exit(1);
+}
 
 const bot = new Telegraf(TOKEN);
 const app = express();
+app.use(express.json({ limit: "1mb" }));
 
-// MVP state is kept in memory. It resets if Render restarts/redeploys.
+// MongoDB keeps bot registrations across Render restarts. Tokens are encrypted before storage.
+const mongo = new MongoClient(MONGODB_URI);
+let botRecords;
+let userRecords;
 const sessions = new Map();
 const balances = new Map();
 const createdBots = new Map();
+const activeBots = new Map();
+const mainWebhookSecret = crypto.randomBytes(32).toString("base64url");
+const encryptionKey = crypto.createHash("sha256").update(TOKEN + ":NEXBOT-token-encryption-v1").digest();
 
-app.get("/", (_req, res) => res.status(200).send("NEXBOT is running."));
-app.get("/health", (_req, res) => res.status(200).json({ ok: true }));
-
-const mainKeyboard = () =>
-  Markup.keyboard([
-    ["🤖 BOT YARATISH"],
-    ["💰 BALANS", "👤 PROFIL"],
-    ["➕ BALANS TO‘LDIRISH", "🆘 YORDAM"]
-  ]).resize();
-
-const typeKeyboard = () =>
-  Markup.inlineKeyboard([
-    [Markup.button.callback("🎬 KINO BOT", "create_kino")],
-    [Markup.button.callback("📥 DOWNLOAD BOT", "create_download")],
-    [Markup.button.callback("📢 SMM BOT", "create_smm")],
-    [Markup.button.callback("⬅️ Bekor qilish", "cancel_create")]
-  ]);
-
+function encryptToken(token) {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", encryptionKey, iv);
+  const encrypted = Buffer.concat([cipher.update(token, "utf8"), cipher.final()]);
+  return { iv: iv.toString("base64"), data: encrypted.toString("base64"), tag: cipher.getAuthTag().toString("base64") };
+}
+function decryptToken(value) {
+  const decipher = crypto.createDecipheriv("aes-256-gcm", encryptionKey, Buffer.from(value.iv, "base64"));
+  decipher.setAuthTag(Buffer.from(value.tag, "base64"));
+  return Buffer.concat([decipher.update(Buffer.from(value.data, "base64")), decipher.final()]).toString("utf8");
+}
+function safeRecord(record) {
+  return { id: record.id, name: record.name, username: record.username, type: record.type, typeLabel: record.typeLabel, createdAt: record.createdAt };
+}
 const money = (amount) => new Intl.NumberFormat("uz-UZ").format(amount) + " so‘m";
 const userBalance = (userId) => balances.get(userId) || 0;
 const userBots = (userId) => createdBots.get(userId) || [];
 
-bot.start(async (ctx) => {
-  sessions.delete(ctx.from.id);
-  await ctx.reply(
-    "⚡ NEXBOT platformasiga xush kelibsiz!\n\nBot yaratish, balans va profilingizni quyidagi tugmalardan boshqaring.",
-    mainKeyboard()
-  );
+app.get("/", (_req, res) => res.status(200).send("NEXBOT is running."));
+app.get("/health", (_req, res) => res.status(200).json({ ok: true }));
+
+// Telegram webhook requests are authenticated with the secret token configured per bot.
+app.post("/telegram/main", async (req, res) => {
+  if (req.get("x-telegram-bot-api-secret-token") !== mainWebhookSecret) return res.sendStatus(401);
+  res.sendStatus(200);
+  try { await bot.handleUpdate(req.body); }
+  catch (error) { console.error("Main bot update failed:", error?.message || "unknown error"); }
+});
+app.post("/telegram/bots/:id", async (req, res) => {
+  const entry = activeBots.get(req.params.id);
+  if (!entry || req.get("x-telegram-bot-api-secret-token") !== entry.secretToken) return res.sendStatus(401);
+  res.sendStatus(200);
+  try { await entry.bot.handleUpdate(req.body); }
+  catch (error) { console.error("Created bot update failed:", error?.message || "unknown error"); }
 });
 
+const mainKeyboard = () => Markup.keyboard([
+  ["🤖 BOT YARATISH"], ["💰 BALANS", "👤 PROFIL"],
+  ["➕ BALANS TO‘LDIRISH", "🆘 YORDAM"]
+]).resize();
+const typeKeyboard = () => Markup.inlineKeyboard([
+  [Markup.button.callback("🎬 KINO BOT", "create_kino")],
+  [Markup.button.callback("📥 DOWNLOAD BOT", "create_download")],
+  [Markup.button.callback("📢 SMM BOT", "create_smm")],
+  [Markup.button.callback("⬅️ Bekor qilish", "cancel_create")]
+]);
+
+bot.start(async (ctx) => {
+  sessions.delete(ctx.from.id);
+  await ctx.reply("⚡ NEXBOT platformasiga xush kelibsiz!\n\nBot yaratish, balans va profilingizni quyidagi tugmalardan boshqaring.", mainKeyboard());
+});
 bot.command("menu", async (ctx) => {
   sessions.delete(ctx.from.id);
   await ctx.reply("Asosiy menyu:", mainKeyboard());
 });
-
 bot.hears("🤖 BOT YARATISH", async (ctx) => {
   sessions.set(ctx.from.id, { step: "choose_type" });
   await ctx.reply("🤖 Qanday bot yaratmoqchisiz? Quyidagi inline tugmalardan birini tanlang:", typeKeyboard());
 });
-
 bot.hears("💰 BALANS", async (ctx) => {
-  await ctx.reply(
-    `💰 Sizning balansingiz: ${money(userBalance(ctx.from.id))}\n\nBu MVP versiyada balans haqiqiy to‘lov bilan avtomatik to‘ldirilmaydi.`,
-    mainKeyboard()
-  );
+  await ctx.reply("💰 Sizning balansingiz: " + money(userBalance(ctx.from.id)) + "\n\nBu MVP versiyada balans haqiqiy to‘lov bilan avtomatik to‘ldirilmaydi.", mainKeyboard());
 });
-
 bot.hears("👤 PROFIL", async (ctx) => {
   const list = userBots(ctx.from.id);
-  const botList = list.length
-    ? list.map((item, index) => `${index + 1}. @${item.username} — ${item.typeLabel}`).join("\n")
-    : "Hali bot yaratmagansiz.";
-  await ctx.reply(
-    `👤 PROFIL\nIsm: ${ctx.from.first_name || "Foydalanuvchi"}\nTelegram ID: ${ctx.from.id}\n💰 Balans: ${money(userBalance(ctx.from.id))}\n🤖 Yaratilgan botlar: ${list.length}\n\n${botList}`,
-    mainKeyboard()
-  );
+  const botList = list.length ? list.map((item, index) => (index + 1) + ". @" + item.username + " — " + item.typeLabel).join("\n") : "Hali bot yaratmagansiz.";
+  await ctx.reply("👤 PROFIL\nIsm: " + (ctx.from.first_name || "Foydalanuvchi") + "\nTelegram ID: " + ctx.from.id + "\n💰 Balans: " + money(userBalance(ctx.from.id)) + "\n🤖 Yaratilgan botlar: " + list.length + "\n\n" + botList, mainKeyboard());
 });
-
 bot.hears("➕ BALANS TO‘LDIRISH", async (ctx) => {
   sessions.set(ctx.from.id, { step: "topup_amount" });
-  await ctx.reply(
-    "➕ Balans to‘ldirish\n\nQancha so‘m to‘ldirmoqchisiz? Faqat summani yuboring (masalan, 20000). Hozircha bu admin orqali qo‘lda ko‘rib chiqiladigan so‘rov; avtomatik to‘lov tizimi ulanmagan.",
-    Markup.keyboard([["⬅️ MENYUGA QAYTISH"]]).resize()
-  );
+  await ctx.reply("➕ Balans to‘ldirish\n\nQancha so‘m to‘ldirmoqchisiz? Faqat summani yuboring (masalan, 20000). Hozircha bu admin orqali qo‘lda ko‘rib chiqiladigan so‘rov; avtomatik to‘lov tizimi ulanmagan.", Markup.keyboard([["⬅️ MENYUGA QAYTISH"]]).resize());
 });
-
 bot.hears("🆘 YORDAM", async (ctx) => {
-  await ctx.reply(
-    "🆘 NEXBOT YORDAM\n\n🤖 BOT YARATISH — BotFather tokenini yuboring va bot turini tanlang.\n💰 BALANS — balansingizni ko‘ring.\n👤 PROFIL — profilingiz va yaratilgan botlar.\n➕ BALANS TO‘LDIRISH — admin ko‘rib chiqishi uchun so‘rov yuboring.\n\nTokeningizni hech kimga, hatto admin deb tanishtirgan notanish odamga ham bermang.",
-    mainKeyboard()
-  );
+  await ctx.reply("🆘 NEXBOT YORDAM\n\n🤖 BOT YARATISH — BotFather tokenini yuboring va bot turini tanlang.\n💰 BALANS — balansingizni ko‘ring.\n👤 PROFIL — profilingiz va yaratilgan botlar.\n➕ BALANS TO‘LDIRISH — admin ko‘rib chiqishi uchun so‘rov yuboring.\n\nTokeningizni hech kimga, hatto admin deb tanishtirgan notanish odamga ham bermang.", mainKeyboard());
 });
-
 bot.hears("⬅️ MENYUGA QAYTISH", async (ctx) => {
   sessions.delete(ctx.from.id);
   await ctx.reply("Asosiy menyu:", mainKeyboard());
 });
-
 bot.action("cancel_create", async (ctx) => {
   sessions.delete(ctx.from.id);
   await ctx.answerCbQuery("Bekor qilindi");
   await ctx.reply("Bot yaratish bekor qilindi.", mainKeyboard());
 });
 
-async function createSelectedBot(ctx, session, type) {
-  const types = {
-    kino: { label: "Kino bot" },
-    download: { label: "Download bot" },
-    smm: { label: "SMM bot" }
-  };
-  const selected = types[type];
-  if (!selected || !session?.token) {
-    sessions.set(ctx.from.id, { step: "choose_type" });
-    return ctx.reply("Avval bot turini tanlang.", typeKeyboard());
-  }
-
-  await ctx.reply(`⏳ ${selected.label} ishga tushirilmoqda. Token tekshirilmoqda...`);
-  try {
-    const record = await launchUserBot({
-      token: session.token,
-      ownerId: ctx.from.id,
-      type,
-      typeLabel: selected.label
-    });
-    const list = userBots(ctx.from.id);
-    list.push(record);
-    createdBots.set(ctx.from.id, list);
-    sessions.delete(ctx.from.id);
-    await ctx.reply(
-      `✅ Bot muvaffaqiyatli ishga tushdi!\\n\\nNomi: ${record.name}\\nUsername: @${record.username}\\nTuri: ${selected.label}\\n\\nSinash uchun @${record.username} ni ochib /start bosing.`,
-      mainKeyboard()
-    );
-  } catch (error) {
-    console.error("User bot setup failed:", error?.message || "unknown error");
-    sessions.set(ctx.from.id, { step: "bot_token", type, token: undefined });
-    await ctx.reply(
-      "❌ Bot ishga tushmadi. Token noto‘g‘ri bo‘lishi yoki bot boshqa joyda ishga tushirilgan bo‘lishi mumkin. Tokenni tekshirib qayta yuboring. Tokenni hech kimga bermang.",
-      Markup.keyboard([["⬅️ MENYUGA QAYTISH"]]).resize()
-    );
-  }
-}
-
-bot.action(/^create_(kino|download|smm)$/, async (ctx) => {
-  await ctx.answerCbQuery();
-  const type = ctx.match[1];
-  const session = sessions.get(ctx.from.id);
-  if (!session?.token) {
-    sessions.set(ctx.from.id, { step: "bot_token", type });
-    const labels = { kino: "🎬 KINO BOT", download: "📥 DOWNLOAD BOT", smm: "📢 SMM BOT" };
-    await ctx.reply(
-      `Siz ${labels[type]}ni tanladingiz. Endi @BotFather orqali yaratgan o‘zingizga tegishli bot tokenini yuboring. Token maxfiy; uni hech kim bilan ulashmang.`,
-      Markup.keyboard([["⬅️ MENYUGA QAYTISH"]]).resize()
-    );
-    return;
-  }
-  return createSelectedBot(ctx, session, type);
-});
-
-async function launchUserBot({ token, ownerId, type, typeLabel }) {
-  const child = new Telegraf(token);
-  // Validate token before starting long polling. Do not log the token.
-  const me = await child.telegram.getMe();
-  const movies = [];
-
+function registerChildHandlers(child, { token, ownerId, type, id, secretToken, record }) {
+  const me = { first_name: record.name, username: record.username };
+  const movies = Array.isArray(record.movies) ? record.movies : [];
   child.start(async (ctx) => {
     const descriptions = {
       kino: "🎬 Kino botga xush kelibsiz!\n\nKinolarni qidirish: /search nom\nKinolar ro‘yxati: /movies\nBot egasi kino qo‘shishi: /addmovie Nom | Tavsif | Havola",
@@ -174,108 +130,145 @@ async function launchUserBot({ token, ownerId, type, typeLabel }) {
     };
     await ctx.reply(descriptions[type] || "Bot ishga tayyor.");
   });
-
   if (type === "kino") {
     child.command("addmovie", async (ctx) => {
-      if (ctx.from.id !== ownerId) {
-        return ctx.reply("Kino qo‘shish faqat bot egasiga ruxsat etilgan.");
-      }
-      const raw = ctx.message.text.replace(/^\/addmovie\s*/i, "");
-      const parts = raw.split("|").map((part) => part.trim());
-      if (parts.length < 3 || !parts[0] || !parts[1] || !/^https:\/\//i.test(parts[2])) {
-        return ctx.reply("Format: /addmovie Kino nomi | Tavsif | https://havola");
-      }
-      movies.push({ title: parts[0], description: parts[1], url: parts.slice(2).join(" | ") });
-      return ctx.reply(`✅ “${parts[0]}” ro‘yxatga qo‘shildi.`);
+      if (ctx.from.id !== ownerId) return ctx.reply("Kino qo‘shish faqat bot egasiga ruxsat etilgan.");
+      const parts = ctx.message.text.replace(/^\/addmovie\s*/i, "").split("|").map((part) => part.trim());
+      if (parts.length < 3 || !parts[0] || !parts[1] || !/^https:\/\//i.test(parts[2])) return ctx.reply("Format: /addmovie Kino nomi | Tavsif | https://havola");
+      const movie = { title: parts[0], description: parts[1], url: parts.slice(2).join(" | ") };
+      movies.push(movie);
+      await botRecords.updateOne({ id }, { $set: { movies } });
+      return ctx.reply("✅ “" + movie.title + "” ro‘yxatga qo‘shildi.");
     });
     child.command("movies", async (ctx) => {
       if (!movies.length) return ctx.reply("Hozircha kino qo‘shilmagan.");
-      return ctx.reply(movies.map((movie, index) => `${index + 1}. ${movie.title}`).join("\n"));
+      return ctx.reply(movies.map((movie, index) => (index + 1) + ". " + movie.title).join("\n"));
     });
     child.command("search", async (ctx) => {
       const query = ctx.message.text.replace(/^\/search\s*/i, "").trim().toLowerCase();
       if (!query) return ctx.reply("Qidirish uchun: /search kino nomi");
       const found = movies.filter((movie) => movie.title.toLowerCase().includes(query)).slice(0, 5);
       if (!found.length) return ctx.reply("Kino topilmadi.");
-      for (const movie of found) {
-        await ctx.reply(`🎬 ${movie.title}\n\n${movie.description}\n\nHavola: ${movie.url}`);
-      }
+      for (const movie of found) await ctx.reply("🎬 " + movie.title + "\n\n" + movie.description + "\n\nHavola: " + movie.url);
     });
   }
-
   if (type === "download") {
     child.on("text", async (ctx) => {
       const input = ctx.message.text.trim();
       if (input.startsWith("/")) return;
       let url;
-      try { url = new URL(input); } catch {
-        return ctx.reply("To‘liq HTTPS MP4 havolasini yuboring.");
-      }
-      if (url.protocol !== "https:" || !/\.mp4$/i.test(url.pathname)) {
-        return ctx.reply("Faqat ochiq, to‘g‘ridan-to‘g‘ri HTTPS .mp4 havolasi qabul qilinadi.");
-      }
-      try {
-        await ctx.replyWithVideo(url.href);
-      } catch {
-        await ctx.reply("Videoni olishning iloji bo‘lmadi. Havola to‘g‘ridan-to‘g‘ri ochilishini tekshiring.");
-      }
+      try { url = new URL(input); } catch { return ctx.reply("To‘liq HTTPS MP4 havolasini yuboring."); }
+      if (url.protocol !== "https:" || !/\.mp4$/i.test(url.pathname)) return ctx.reply("Faqat ochiq, to‘g‘ridan-to‘g‘ri HTTPS .mp4 havolasi qabul qilinadi.");
+      try { await ctx.replyWithVideo(url.href); }
+      catch { await ctx.reply("Videoni olishning iloji bo‘lmadi. Havola to‘g‘ridan-to‘g‘ri ochilishini tekshiring."); }
     });
   }
-
   if (type === "smm") {
     child.on("text", async (ctx) => {
       const input = ctx.message.text.trim();
       if (input.startsWith("/")) return;
       try {
-        await child.telegram.sendMessage(
-          ownerId,
-          `📢 Yangi SMM so‘rovi\nBot: @${me.username}\nFoydalanuvchi ID: ${ctx.from.id}\nUsername: @${ctx.from.username || "yo‘q"}\n\nSo‘rov: ${input}`
-        );
+        await child.telegram.sendMessage(ownerId, "📢 Yangi SMM so‘rovi\nBot: @" + me.username + "\nFoydalanuvchi ID: " + ctx.from.id + "\nUsername: @" + (ctx.from.username || "yo‘q") + "\n\nSo‘rov: " + input);
         await ctx.reply("✅ So‘rovingiz bot egasiga yuborildi.");
-      } catch {
-        await ctx.reply("So‘rovni yuborib bo‘lmadi. Keyinroq urinib ko‘ring.");
-      }
+      } catch { await ctx.reply("So‘rovni yuborib bo‘lmadi. Keyinroq urinib ko‘ring."); }
     });
   }
-
   child.catch((error) => console.error("Created bot error:", error?.message || "unknown error"));
-  await child.launch();
-  return { name: me.first_name, username: me.username, type, typeLabel, bot: child };
+  return { bot: child, secretToken, token, id, ownerId, type };
 }
+
+async function startSavedBot(record, token) {
+  const child = new Telegraf(token);
+  const entry = registerChildHandlers(child, {
+    token, ownerId: record.ownerId, type: record.type, id: record.id,
+    secretToken: record.webhookSecret, record
+  });
+  activeBots.set(record.id, entry);
+  await child.telegram.setWebhook(BASE_URL + "/telegram/bots/" + record.id, { secret_token: record.webhookSecret, drop_pending_updates: false });
+  const safe = safeRecord(record);
+  const list = createdBots.get(record.ownerId) || [];
+  if (!list.some((item) => item.id === safe.id)) list.push(safe);
+  createdBots.set(record.ownerId, list);
+  return entry;
+}
+
+async function launchUserBot({ token, ownerId, type, typeLabel }) {
+  const child = new Telegraf(token);
+  const me = await child.telegram.getMe();
+  const id = crypto.randomUUID();
+  const webhookSecret = crypto.randomBytes(32).toString("base64url");
+  const record = {
+    id, ownerId, type, typeLabel, name: me.first_name, username: me.username,
+    encryptedToken: encryptToken(token), webhookSecret, movies: [], createdAt: new Date().toISOString()
+  };
+  await botRecords.insertOne(record);
+  try {
+    const entry = await startSavedBot(record, token);
+    return { ...safeRecord(record), bot: entry.bot };
+  } catch (error) {
+    activeBots.delete(id);
+    await botRecords.deleteOne({ id });
+    try { await child.telegram.deleteWebhook({ drop_pending_updates: false }); } catch {}
+    throw error;
+  }
+}
+
+async function createSelectedBot(ctx, session, type) {
+  const types = { kino: { label: "Kino bot" }, download: { label: "Download bot" }, smm: { label: "SMM bot" } };
+  const selected = types[type];
+  if (!selected || !session?.token) {
+    sessions.set(ctx.from.id, { step: "choose_type" });
+    return ctx.reply("Avval bot turini tanlang.", typeKeyboard());
+  }
+  await ctx.reply("⏳ " + selected.label + " ishga tushirilmoqda. Token tekshirilmoqda...");
+  try {
+    const record = await launchUserBot({ token: session.token, ownerId: ctx.from.id, type, typeLabel: selected.label });
+    const list = userBots(ctx.from.id);
+    list.push({ id: record.id, name: record.name, username: record.username, type: record.type, typeLabel: record.typeLabel, createdAt: record.createdAt });
+    createdBots.set(ctx.from.id, list);
+    sessions.delete(ctx.from.id);
+    await ctx.reply("✅ Bot muvaffaqiyatli ishga tushdi!\n\nNomi: " + record.name + "\nUsername: @" + record.username + "\nTuri: " + selected.label + "\n\nSinash uchun @" + record.username + " ni ochib /start bosing.", mainKeyboard());
+  } catch (error) {
+    console.error("User bot setup failed:", error?.message || "unknown error");
+    sessions.set(ctx.from.id, { step: "bot_token", type, token: undefined });
+    await ctx.reply("❌ Bot ishga tushmadi. Token noto‘g‘ri bo‘lishi yoki boshqa sozlamada muammo bo‘lishi mumkin. Tokenni tekshirib qayta yuboring. Tokenni hech kimga bermang.", Markup.keyboard([["⬅️ MENYUGA QAYTISH"]]).resize());
+  }
+}
+bot.action(/^create_(kino|download|smm)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const type = ctx.match[1];
+  const session = sessions.get(ctx.from.id);
+  if (!session?.token) {
+    sessions.set(ctx.from.id, { step: "bot_token", type });
+    const labels = { kino: "🎬 KINO BOT", download: "📥 DOWNLOAD BOT", smm: "📢 SMM BOT" };
+    await ctx.reply("Siz " + labels[type] + "ni tanladingiz. Endi @BotFather orqali yaratgan o‘zingizga tegishli bot tokenini yuboring. Token maxfiy; uni hech kim bilan ulashmang.", Markup.keyboard([["⬅️ MENYUGA QAYTISH"]]).resize());
+    return;
+  }
+  return createSelectedBot(ctx, session, type);
+});
 
 bot.on("text", async (ctx) => {
   const session = sessions.get(ctx.from.id);
   if (!session) return;
-
   const input = ctx.message.text.trim();
   if (input.startsWith("/")) return;
-
   if (session.step === "bot_token") {
-    // Delete the message containing the secret token when Telegram permits it.
-    try { await ctx.deleteMessage(); } catch { /* Telegram may refuse message deletion. */ }
-    if (input.length < 30 || !input.includes(":")) {
-      return ctx.reply("Token formati noto‘g‘ri ko‘rinadi. @BotFather bergan tokenni qayta tekshiring va yuboring.");
-    }
+    try { await ctx.deleteMessage(); } catch {}
+    if (input.length < 30 || !input.includes(":")) return ctx.reply("Token formati noto‘g‘ri ko‘rinadi. @BotFather bergan tokenni qayta tekshiring va yuboring.");
     session.token = input;
     const selectedType = session.type;
-    sessions.set(ctx.from.id, session);
     if (!selectedType) {
       sessions.set(ctx.from.id, { step: "choose_type", token: input });
       return ctx.reply("Token qabul qilindi. Endi bot turini tanlang:", typeKeyboard());
     }
     return createSelectedBot(ctx, session, selectedType);
   }
-
   if (session.step === "topup_amount") {
     const amount = Number(input.replace(/[\s,]/g, ""));
-    if (!Number.isSafeInteger(amount) || amount < 1000 || amount > 100000000) {
-      return ctx.reply("Summani raqam bilan yuboring (kamida 1000 so‘m).", mainKeyboard());
-    }
+    if (!Number.isSafeInteger(amount) || amount < 1000 || amount > 100000000) return ctx.reply("Summani raqam bilan yuboring (kamida 1000 so‘m).", mainKeyboard());
     sessions.delete(ctx.from.id);
-    const message = `💳 Balans to‘ldirish so‘rovi\nIsm: ${ctx.from.first_name || "Foydalanuvchi"}\nTelegram ID: ${ctx.from.id}\nUsername: @${ctx.from.username || "yo‘q"}\nSumma: ${money(amount)}`;
-    if (!ADMIN_IDS.length) {
-      return ctx.reply("So‘rov saqlandi faqat joriy sessiya ichida, lekin admin xabari yuborilmadi. Render Environment’da ADMIN_IDS sozlang.", mainKeyboard());
-    }
+    const message = "💳 Balans to‘ldirish so‘rovi\nIsm: " + (ctx.from.first_name || "Foydalanuvchi") + "\nTelegram ID: " + ctx.from.id + "\nUsername: @" + (ctx.from.username || "yo‘q") + "\nSumma: " + money(amount);
+    if (!ADMIN_IDS.length) return ctx.reply("So‘rov saqlandi faqat joriy sessiya ichida, lekin admin xabari yuborilmadi. Render Environment’da ADMIN_IDS sozlang.", mainKeyboard());
     for (const id of ADMIN_IDS) {
       try { await bot.telegram.sendMessage(id, message); }
       catch (error) { console.error("Could not notify admin:", error?.message || "unknown error"); }
@@ -284,39 +277,56 @@ bot.on("text", async (ctx) => {
   }
 });
 
-// Admin can manually credit a balance in the current running session: /credit USER_ID AMOUNT
 bot.command("credit", async (ctx) => {
   if (!ADMIN_IDS.includes(ctx.from.id)) return ctx.reply("Bu buyruq faqat admin uchun.");
   const parts = ctx.message.text.split(/\s+/);
   const userId = Number(parts[1]);
   const amount = Number(parts[2]);
-  if (!Number.isSafeInteger(userId) || !Number.isSafeInteger(amount) || amount <= 0) {
-    return ctx.reply("Format: /credit USER_ID AMOUNT");
-  }
+  if (!Number.isSafeInteger(userId) || !Number.isSafeInteger(amount) || amount <= 0) return ctx.reply("Format: /credit USER_ID AMOUNT");
   balances.set(userId, userBalance(userId) + amount);
-  return ctx.reply(`✅ ${userId} foydalanuvchi balansi ${money(amount)} ga oshirildi.`);
+  return ctx.reply("✅ " + userId + " foydalanuvchi balansi " + money(amount) + " ga oshirildi.");
 });
 
 bot.catch((error) => console.error("NEXBOT error:", error?.message || "unknown error"));
 
-const server = app.listen(PORT, "0.0.0.0", () => {
-  console.log(`HTTP server listening on ${PORT}`);
-});
+const server = app.listen(PORT, "0.0.0.0", () => console.log("HTTP server listening on " + PORT));
 
-bot.launch().then(() => console.log("NEXBOT started")).catch((error) => {
-  console.error("NEXBOT launch failed:", error?.message || "unknown error");
-  server.close(() => process.exit(1));
-});
+async function startApp() {
+  await mongo.connect();
+  const db = mongo.db();
+  botRecords = db.collection("nexbot_created_bots");
+  userRecords = db.collection("nexbot_users");
+  await botRecords.createIndex({ id: 1 }, { unique: true });
+  await botRecords.createIndex({ ownerId: 1 });
+  await userRecords.createIndex({ userId: 1 }, { unique: true });
 
-const shutdown = (signal) => {
-  console.log(`${signal} received; stopping bots`);
-  bot.stop(signal);
-  for (const list of createdBots.values()) {
-    for (const record of list) {
-      try { record.bot.stop(signal); } catch { /* best-effort shutdown */ }
+  const saved = await botRecords.find({}).toArray();
+  for (const record of saved) {
+    try {
+      const token = decryptToken(record.encryptedToken);
+      await startSavedBot(record, token);
+      console.log("Restored created bot: @" + record.username);
+    } catch (error) {
+      console.error("Could not restore bot " + (record.username || record.id) + ":", error?.message || "unknown error");
     }
   }
-  server.close(() => process.exit(0));
+  await bot.telegram.setWebhook(BASE_URL + "/telegram/main", { secret_token: mainWebhookSecret, drop_pending_updates: false });
+  console.log("NEXBOT webhook configured");
+}
+startApp().catch((error) => {
+  console.error("Startup failed:", error?.message || "unknown error");
+});
+
+const shutdown = async (signal) => {
+  console.log(signal + " received; stopping bots");
+  try { await bot.telegram.deleteWebhook({ drop_pending_updates: false }); } catch {}
+  for (const entry of activeBots.values()) {
+    try { await entry.bot.telegram.deleteWebhook({ drop_pending_updates: false }); } catch {}
+  }
+  server.close(async () => {
+    try { await mongo.close(); } catch {}
+    process.exit(0);
+  });
 };
 process.once("SIGINT", () => shutdown("SIGINT"));
 process.once("SIGTERM", () => shutdown("SIGTERM"));
