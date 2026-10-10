@@ -182,12 +182,12 @@ function registerChildHandlers(child, { token, ownerId, type, id, secretToken, r
       else customers.push(entry);
       await saveField("customers", customers);
     };
-    const adminKeyboard = () => Markup.inlineKeyboard([
-      [Markup.button.callback("🎬 Kino qo‘shish", "kino:add"), Markup.button.callback("📊 Statistika", "kino:stats")],
-      [Markup.button.callback("📢 Majburiy kanal", "kino:channels"), Markup.button.callback("🔎 Mijozni ID orqali qidirish", "kino:user")],
-      [Markup.button.callback("👑 Premium tariflar", "kino:premium"), Markup.button.callback("📚 Kinolar ro‘yxati", "kino:list")],
-      [Markup.button.callback("❌ Kino o‘chirish", "kino:delete")]
-    ]);
+    const adminKeyboard = () => Markup.keyboard([
+      ["🎬 Kino qo‘shish", "📊 Statistika"],
+      ["📢 Majburiy kanal", "🔎 Mijozni ID orqali qidirish"],
+      ["👑 Premium tariflar", "📚 Kinolar ro‘yxati"],
+      ["❌ Kino o‘chirish", "❌ Panelni yopish"]
+    ]).resize().persistent();
     const customerHasChannels = async (ctx) => {
       for (const channel of channels) {
         try {
@@ -214,6 +214,53 @@ function registerChildHandlers(child, { token, ownerId, type, id, secretToken, r
     child.command("cancel", async (ctx) => {
       adminState.delete(ctx.from.id);
       return ctx.reply("Jarayon bekor qilindi.");
+    });
+
+    // Reply-keyboard handlers: these buttons appear in the user's Telegram keyboard.
+    child.hears("🎬 Kino qo‘shish", async (ctx) => {
+      if (!isAdmin(ctx.from.id)) return ctx.reply("⛔ Ruxsat yo‘q.");
+      adminState.set(ctx.from.id, { step: "movie_code" });
+      return ctx.reply("Kino kodini yuboring (masalan, 58321). Bekor qilish: /cancel");
+    });
+    child.hears("📊 Statistika", async (ctx) => {
+      if (!isAdmin(ctx.from.id)) return;
+      const active = movies.filter((movie) => movie.status === "active").length;
+      const pending = movies.filter((movie) => movie.status === "pending").length;
+      const totalViews = movieViews.reduce((sum, item) => sum + (item.count || 0), 0);
+      return ctx.reply("📊 KINO BOT STATISTIKASI\\n\\n👥 Mijozlar: " + customers.length +
+        "\\n🎬 Faol kinolar: " + active + "\\n⏳ Tugallanmagan kinolar: " + pending +
+        "\\n▶️ Kino yuborilgan: " + totalViews + "\\n📢 Majburiy kanallar: " + channels.length +
+        "\\n👑 Premium mijozlar: " + premiumUsers.filter((u) => new Date(u.expiresAt).getTime() > Date.now()).length);
+    });
+    child.hears("📢 Majburiy kanal", async (ctx) => {
+      if (!isAdmin(ctx.from.id)) return;
+      adminState.set(ctx.from.id, { step: "channel" });
+      const list = channels.length ? channels.map((ch, i) => (i + 1) + ". " + ch.title + " (" + ch.chatId + ")").join("\\n") : "Hozircha kanal qo‘shilmagan.";
+      return ctx.reply("📢 MAJBURIY KANALLAR\\n" + list + "\\n\\nKanal @username yoki ID sini yuboring. Bot kanalda admin bo‘lishi kerak.\\nO‘chirish: /delchannel CHANNEL_ID\\nBekor qilish: /cancel");
+    });
+    child.hears("🔎 Mijozni ID orqali qidirish", async (ctx) => {
+      if (!isAdmin(ctx.from.id)) return;
+      adminState.set(ctx.from.id, { step: "user_id" });
+      return ctx.reply("Mijozning Telegram ID raqamini yuboring. Bekor qilish: /cancel");
+    });
+    child.hears("👑 Premium tariflar", async (ctx) => {
+      if (!isAdmin(ctx.from.id)) return;
+      const plans = premiumPlans.length ? premiumPlans.map((p) => "• " + p.name + " — " + p.price + " so‘m / " + p.days + " kun").join("\\n") : "Tariflar hali yaratilmagan.";
+      return ctx.reply("👑 PREMIUM TARIFLAR\\n" + plans + "\\n\\nTarif yaratish: /addplan Nomi | Narxi | Kun\\nPremium berish: /givepremium USER_ID KUN\\nTekshirish: /checkpremium USER_ID");
+    });
+    child.hears("📚 Kinolar ro‘yxati", async (ctx) => {
+      if (!isAdmin(ctx.from.id)) return;
+      if (!movies.length) return ctx.reply("Kinolar hali yo‘q.");
+      return ctx.reply("📚 KINOLAR\\n\\n" + movies.map((m) => "• " + m.code + " — " + (m.title || "Nomsiz") + " [" + m.status + "]").join("\\n"));
+    });
+    child.hears("❌ Kino o‘chirish", async (ctx) => {
+      if (!isAdmin(ctx.from.id)) return;
+      adminState.set(ctx.from.id, { step: "delete_movie" });
+      return ctx.reply("O‘chiriladigan kino kodini yuboring. Bekor qilish: /cancel");
+    });
+    child.hears("❌ Panelni yopish", async (ctx) => {
+      if (!isAdmin(ctx.from.id)) return;
+      return ctx.reply("Admin paneli yopildi.", Markup.removeKeyboard());
     });
 
     child.action("kino:add", async (ctx) => {
